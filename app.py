@@ -11,7 +11,7 @@ import json
 import uuid
 from typing import Dict, List, Optional, Union, Any
 from datetime import datetime
-from flask import Flask, request, jsonify, Response, send_from_directory
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 
 # G4F imports
@@ -27,9 +27,6 @@ logger = logging.getLogger(__name__)
 # Initialize Flask app
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
-
-# Token storage file
-TOKENS_FILE = 'tokens.json'
 
 # Available models in g4f
 AVAILABLE_MODELS = [
@@ -53,64 +50,6 @@ DEFAULT_SETTINGS = {
 # Session storage - for Vercel, this will reset on each cold start
 # For production, consider using a database or Redis
 sessions = {}
-
-def load_tokens():
-    """Load tokens from JSON file"""
-    try:
-        if os.path.exists(TOKENS_FILE):
-            with open(TOKENS_FILE, 'r') as f:
-                data = json.load(f)
-                return data.get('tokens', [])
-        return []
-    except Exception as e:
-        logger.error(f"Error loading tokens: {e}")
-        return []
-
-def save_tokens(tokens):
-    """Save tokens to JSON file"""
-    try:
-        with open(TOKENS_FILE, 'w') as f:
-            json.dump({'tokens': tokens}, f, indent=2)
-        return True
-    except Exception as e:
-        logger.error(f"Error saving tokens: {e}")
-        return False
-
-def generate_token():
-    """Generate a unique API token"""
-    return f"ak_{uuid.uuid4().hex}"
-
-def is_valid_token(token):
-    """Check if a token is valid"""
-    tokens = load_tokens()
-    return any(t['token'] == token for t in tokens)
-
-def require_token(f):
-    """Decorator to require valid token for API endpoints"""
-    def decorated_function(*args, **kwargs):
-        auth_header = request.headers.get('Authorization')
-        if not auth_header:
-            return jsonify({
-                "success": False,
-                "error": "Authorization header required"
-            }), 401
-        
-        if not auth_header.startswith('Bearer '):
-            return jsonify({
-                "success": False,
-                "error": "Invalid authorization format. Use 'Bearer <token>'"
-            }), 401
-        
-        token = auth_header[7:]  # Remove 'Bearer ' prefix
-        if not is_valid_token(token):
-            return jsonify({
-                "success": False,
-                "error": "Invalid or expired token"
-            }), 401
-        
-        return f(*args, **kwargs)
-    decorated_function.__name__ = f.__name__
-    return decorated_function
 
 class ChatSession:
     """Class to manage chat session data"""
@@ -183,70 +122,15 @@ def get_session(session_id: str) -> ChatSession:
 
 @app.route('/', methods=['GET'])
 def index():
-    """Serve the main page"""
-    return send_from_directory('.', 'index.html')
-
-@app.route('/api/tokens', methods=['POST'])
-def create_token():
-    """Create a new API token"""
-    data = request.json or {}
-    description = data.get('description', '').strip()
-    
-    if not description:
-        return jsonify({
-            "success": False,
-            "error": "Description is required"
-        }), 400
-    
-    # Generate new token
-    token = generate_token()
-    
-    # Load existing tokens
-    tokens = load_tokens()
-    
-    # Add new token
-    new_token = {
-        "token": token,
-        "description": description,
-        "created_at": datetime.now().isoformat()
-    }
-    tokens.append(new_token)
-    
-    # Save tokens
-    if save_tokens(tokens):
-        return jsonify({
-            "success": True,
-            "token": token,
-            "description": description,
-            "created_at": new_token["created_at"]
-        })
-    else:
-        return jsonify({
-            "success": False,
-            "error": "Failed to save token"
-        }), 500
-
-@app.route('/api/tokens', methods=['GET'])
-def list_tokens():
-    """List all tokens (without showing full token values)"""
-    tokens = load_tokens()
-    
-    # Return tokens without full token values for security
-    safe_tokens = []
-    for token in tokens:
-        safe_token = token.copy()
-        # Only show first 8 and last 4 characters of token
-        if len(safe_token['token']) > 12:
-            safe_token['token'] = safe_token['token'][:8] + '...' + safe_token['token'][-4:]
-        safe_tokens.append(safe_token)
-    
+    """Root endpoint for health check"""
     return jsonify({
         "success": True,
-        "tokens": safe_tokens
+        "message": "G4F API Server is running",
+        "version": "1.0.0",
+        "timestamp": datetime.now().isoformat()
     })
 
 @app.route('/api/models', methods=['GET'])
-@require_token
 def get_models():
     """Get available models"""
     return jsonify({
@@ -255,7 +139,6 @@ def get_models():
     })
 
 @app.route('/api/sessions', methods=['GET'])
-@require_token
 def list_sessions():
     """List all sessions"""
     result = []
@@ -274,7 +157,6 @@ def list_sessions():
     })
 
 @app.route('/api/sessions', methods=['POST'])
-@require_token
 def create_session():
     """Create a new session"""
     data = request.json or {}
@@ -298,7 +180,6 @@ def create_session():
     })
 
 @app.route('/api/sessions/<session_id>', methods=['GET'])
-@require_token
 def get_session_info(session_id):
     """Get session information"""
     if session_id not in sessions:
@@ -319,7 +200,6 @@ def get_session_info(session_id):
     })
 
 @app.route('/api/sessions/<session_id>', methods=['DELETE'])
-@require_token
 def delete_session(session_id):
     """Delete a session"""
     if session_id not in sessions:
@@ -336,7 +216,6 @@ def delete_session(session_id):
     })
 
 @app.route('/api/sessions/<session_id>/settings', methods=['PUT'])
-@require_token
 def update_session_settings(session_id):
     """Update session settings"""
     if session_id not in sessions:
@@ -368,7 +247,6 @@ def update_session_settings(session_id):
     })
 
 @app.route('/api/sessions/<session_id>/history', methods=['GET'])
-@require_token
 def get_session_history(session_id):
     """Get session history"""
     if session_id not in sessions:
@@ -385,7 +263,6 @@ def get_session_history(session_id):
     })
 
 @app.route('/api/sessions/<session_id>/history', methods=['DELETE'])
-@require_token
 def clear_session_history(session_id):
     """Clear session history"""
     if session_id not in sessions:
@@ -403,7 +280,6 @@ def clear_session_history(session_id):
     })
 
 @app.route('/api/sessions/<session_id>/chat', methods=['POST'])
-@require_token
 def chat(session_id):
     """Send a message and get a response"""
     if session_id not in sessions:
@@ -456,8 +332,6 @@ def catch_all(path):
         "success": False,
         "error": f"Endpoint not found: /{path}",
         "available_endpoints": [
-            "/",
-            "/api/tokens",
             "/api/models",
             "/api/sessions",
             "/api/sessions/<session_id>",
@@ -475,4 +349,3 @@ if __name__ == '__main__':
     
     # Run the app
     app.run(host='0.0.0.0', port=port)
-
