@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-G4F API Server for Vercel
+G4F API Server for Vercel with Streaming Support
 This Flask API server provides access to AI models through the g4f library.
-Optimized for serverless deployment on Vercel.
+Optimized for serverless deployment on Vercel with streaming response capability.
 """
 
 import os
 import logging
 import json
 import uuid
-from typing import Dict, List, Optional, Union, Any
+from typing import Dict, List, Optional, Union, Any, Generator
 from datetime import datetime
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, stream_template
 from flask_cors import CORS
 
 # G4F imports
@@ -82,7 +82,7 @@ class ChatSession:
         self.last_activity = datetime.now()
     
     def get_response(self, message: str = None) -> str:
-        """Get a response from the AI model"""
+        """Get a response from the AI model (non-streaming)"""
         if message:
             self.add_message("user", message)
         
@@ -113,6 +113,59 @@ class ChatSession:
         
         self.add_message("assistant", ai_response)
         return ai_response
+    
+    def get_streaming_response(self, message: str = None) -> Generator[str, None, None]:
+        """Get a streaming response from the AI model"""
+        if message:
+            self.add_message("user", message)
+        
+        full_response = ""
+        
+        try:
+            # Try using the client API with streaming
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.settings["model"],
+                    messages=self.get_history(),
+                    temperature=self.settings["temperature"],
+                    max_tokens=self.settings["max_tokens"],
+                    web_search=self.settings["web_search"],
+                    stream=True
+                )
+                
+                for chunk in response:
+                    if hasattr(chunk, 'choices') and chunk.choices:
+                        delta = chunk.choices[0].delta
+                        if hasattr(delta, 'content') and delta.content:
+                            content = delta.content
+                            full_response += content
+                            yield content
+                            
+            except Exception as e:
+                logger.warning(f"G4F client streaming failed: {e}, falling back to direct method")
+                
+                # Fallback to direct method with streaming
+                response = g4f.ChatCompletion.create(
+                    model=self.settings["model"],
+                    messages=self.get_history(),
+                    temperature=self.settings["temperature"],
+                    stream=True
+                )
+                
+                for chunk in response:
+                    if chunk:
+                        full_response += chunk
+                        yield chunk
+                        
+        except Exception as e:
+            logger.error(f"All streaming methods failed: {e}")
+            error_msg = f"Ошибка при получении ответа: {str(e)}"
+            full_response = error_msg
+            yield error_msg
+        
+        # Add the complete response to history
+        if full_response:
+            self.add_message("assistant", full_response)
 
 def get_session(session_id: str) -> ChatSession:
     """Get or create a session"""
@@ -125,8 +178,8 @@ def index():
     """Root endpoint for health check"""
     return jsonify({
         "success": True,
-        "message": "G4F API Server is running",
-        "version": "1.0.0",
+        "message": "G4F API Server is running with streaming support",
+        "version": "1.1.0",
         "timestamp": datetime.now().isoformat()
     })
 
@@ -281,7 +334,7 @@ def clear_session_history(session_id):
 
 @app.route('/api/sessions/<session_id>/chat', methods=['POST'])
 def chat(session_id):
-    """Send a message and get a response"""
+    """Send a message and get a response (non-streaming)"""
     if session_id not in sessions:
         return jsonify({
             "success": False,
@@ -314,13 +367,63 @@ def chat(session_id):
             "error": str(e)
         }), 500
 
+@app.route('/api/sessions/<session_id>/chat/stream', methods=['POST'])
+def chat_stream(session_id):
+    """Send a message and get a streaming response"""
+    if session_id not in sessions:
+        return jsonify({
+            "success": False,
+            "error": "Session not found"
+        }), 404
+    
+    data = request.json or {}
+    message = data.get('message')
+    
+    if not message:
+        return jsonify({
+            "success": False,
+            "error": "No message provided"
+        }), 400
+    
+    session = sessions[session_id]
+    
+    def generate():
+        """Generator function for streaming response"""
+        try:
+            # Send initial success message
+            yield f"data: {json.dumps({'success': True, 'type': 'start'})}\n\n"
+            
+            # Stream the AI response
+            for chunk in session.get_streaming_response(message):
+                if chunk:
+                    yield f"data: {json.dumps({'success': True, 'type': 'chunk', 'content': chunk})}\n\n"
+            
+            # Send completion message with updated history
+            yield f"data: {json.dumps({'success': True, 'type': 'end', 'history': session.get_history()})}\n\n"
+            
+        except Exception as e:
+            logger.error(f"Error in streaming chat: {e}")
+            yield f"data: {json.dumps({'success': False, 'error': str(e)})}\n\n"
+    
+    return Response(
+        generate(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Headers': 'Content-Type',
+        }
+    )
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
     return jsonify({
         "success": True,
         "status": "healthy",
-        "version": "1.0.0",
+        "version": "1.1.0",
+        "features": ["streaming", "sessions", "multiple_models"],
         "timestamp": datetime.now().isoformat()
     })
 
@@ -338,6 +441,7 @@ def catch_all(path):
             "/api/sessions/<session_id>/settings",
             "/api/sessions/<session_id>/history",
             "/api/sessions/<session_id>/chat",
+            "/api/sessions/<session_id>/chat/stream",
             "/api/health"
         ]
     }), 404
@@ -348,4 +452,5 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     
     # Run the app
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, debug=True)
+
